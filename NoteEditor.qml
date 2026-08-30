@@ -21,6 +21,10 @@ Item {
   readonly property color ruleColor: paper.rule
   readonly property int tabWidth: 34
   readonly property int pad: 16
+  // The strip along the bottom of the card that belongs to the hint and the
+  // action buttons. The body has to end above it: a Flickable that fills to
+  // the card's edge will happily scroll text underneath them.
+  readonly property int footerHeight: 24
 
   signal closeRequested()
 
@@ -134,7 +138,7 @@ Item {
         leftMargin: editor.tabWidth + editor.pad
         rightMargin: editor.pad
         topMargin: editor.pad
-        bottomMargin: editor.pad
+        bottomMargin: editor.pad + editor.footerHeight
       }
       store: editor.store
       note: editor.note

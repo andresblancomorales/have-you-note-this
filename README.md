@@ -84,6 +84,10 @@ the card says so while the caret is in it:
 | `Ctrl + Shift + A` | Archive it |
 | `Ctrl + Backspace` | Delete it — press twice, then ten seconds to undo |
 
+The bar button and `SUPER + ALT + A` **toggle** the window. Quickshell's
+windows ignore the compositor's close request, so `SUPER + W` does nothing to
+this one — `Esc`, the bar button and that shortcut are the ways out.
+
 `F1` or `?` in the All Notes window shows every one of these on one card —
 also under the ⋯ menu, in the pill's right-click menu, and at
 `omarchy-shell notethis shortcuts` if you would rather bind a key to it.
