@@ -41,7 +41,7 @@ BarWidget {
       return
     }
     Quickshell.execDetached(["omarchy-shell", "notethis",
-      method === "showAllNotes" ? "allNotes" : (method === "newNote" ? "newNote" : "toggle")])
+      method === "toggleAllNotes" ? "allNotes" : (method === "newNote" ? "newNote" : "toggle")])
   }
 
   implicitWidth: button.implicitWidth
@@ -61,7 +61,10 @@ BarWidget {
     onPressed: function(pressedButton) {
       if (pressedButton === Qt.RightButton) root.callPlugin("newNote")
       else if (pressedButton === Qt.MiddleButton) root.callPlugin("toggleDeck")
-      else root.callPlugin("showAllNotes", "all")
+      // Toggle, not open: a button that lights up when the window is open
+      // should turn it off again, and one that does nothing on every click
+      // after the first reads as broken.
+      else root.callPlugin("toggleAllNotes")
     }
   }
 }

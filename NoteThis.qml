@@ -50,7 +50,8 @@ Item {
 
   readonly property var deckNotes: Notes.activeNotes(noteStore.notes)
 
-  // Read by the bar widget so its button carries the window's open state.
+  // Read by the bar widget, so its button carries the window's open state --
+  // and by the toggle below, so summoning twice puts the window away.
   readonly property bool allNotesOpen: allNotesLoader.item ? allNotesLoader.item.visible : false
 
   // ---------------------------------------------------------- settings
@@ -290,6 +291,20 @@ Item {
     else allNotesLoader.pendingShortcuts = true
   }
 
+  function hideAllNotes() {
+    if (allNotesLoader.item) allNotesLoader.item.hide()
+  }
+
+  // Summoning something already summoned should put it away. Quickshell's
+  // windows ignore the compositor's close request -- Super+W does nothing to
+  // them, and the `closed` signal never fires -- so this and Esc are the ways
+  // out. A button that does nothing on every press after the first reads as
+  // broken, which is exactly how it was reported.
+  function toggleAllNotes() {
+    if (root.allNotesOpen) hideAllNotes()
+    else showAllNotes("all")
+  }
+
   function showAllNotes(filter) {
     allNotesLoader.pendingFilter = filter || "all"
     if (allNotesLoader.item) allNotesLoader.item.show(allNotesLoader.pendingFilter)
@@ -342,7 +357,7 @@ Item {
     target: "notethis"
 
     function newNote(): string { root.newNote(); return "ok" }
-    function allNotes(): string { root.showAllNotes("all"); return "ok" }
+    function allNotes(): string { root.toggleAllNotes(); return "ok" }
     function archive(): string { root.showAllNotes("archived"); return "ok" }
     function shortcuts(): string { root.showShortcuts(); return "ok" }
     function about(): string { root.showAbout(); return "ok" }
