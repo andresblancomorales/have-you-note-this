@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Installs the Have you note-this? keybindings and the All Notes window rule into
+# the user's Hyprland config. Both go in a marked block, so re-running this
+# replaces the block rather than stacking copies of it, and `--remove` takes
+# it back out.
+#
+#   notethis-setup            install or refresh the block
+#   notethis-setup --remove   take it out again
+set -euo pipefail
+
+ID="ablanco.notethis"
+BINDINGS="${HOME}/.config/hypr/bindings.lua"
+WINDOWS="${HOME}/.config/hypr/hyprland.lua"
+
+strip_block() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  # Drop any previous block, then any blank lines it left doubled up.
+  awk -v id="$ID" '
+    $0 == "-- BEGIN " id { skip = 1; next }
+    $0 == "-- END " id   { skip = 0; next }
+    !skip { print }
+  ' "$file" > "${file}.hmn.tmp"
+  mv "${file}.hmn.tmp" "$file"
+}
+
+append_bindings() {
+  cat >> "$BINDINGS" <<LUA
+
+-- BEGIN ${ID}
+-- Have you note-this?. Mirrors the Mac app's shortcuts, with SUPER + ALT standing
+-- in for its Option + Command.
+o.bind("SUPER + ALT + N", "New note", "omarchy-shell notethis newNote")
+o.bind("SUPER + ALT + A", "All notes", "omarchy-shell notethis allNotes")
+o.bind("SUPER + ALT + L", "Note archive", "omarchy-shell notethis archive")
+o.bind("SUPER + ALT + D", "Toggle note deck", "omarchy-shell notethis toggle")
+-- END ${ID}
+LUA
+}
+
+append_windows() {
+  cat >> "$WINDOWS" <<LUA
+
+-- BEGIN ${ID}
+-- The All Notes browser is a real window; tiling it next to your editor is
+-- not what a notes browser is for. Matched by class alone: a window's title
+-- is still empty when Hyprland evaluates rules at map time, so a title match
+-- never fires. org.quickshell is the shell's own window class, and the shell
+-- opens no other ordinary windows.
+o.window("org\\\\.quickshell", { float = true, center = true })
+-- END ${ID}
+LUA
+}
+
+for file in "$BINDINGS" "$WINDOWS"; do
+  if [[ ! -f "$file" ]]; then
+    echo "notethis-setup: no $file -- is this an Omarchy 4 machine?" >&2
+    exit 1
+  fi
+  cp "$file" "${file}.bak.$(date +%s)"
+  strip_block "$file"
+done
+
+if [[ "${1:-}" == "--remove" ]]; then
+  echo "Removed the Have you note-this? block from bindings.lua and hyprland.lua."
+else
+  append_bindings
+  append_windows
+  echo "Installed:"
+  echo "  SUPER + ALT + N   new note"
+  echo "  SUPER + ALT + A   all notes"
+  echo "  SUPER + ALT + L   archive"
+  echo "  SUPER + ALT + D   toggle the deck"
+fi
+
+hyprctl reload > /dev/null 2>&1 || true
+echo "Hyprland reloaded."

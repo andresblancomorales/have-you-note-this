@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "ablanco.notethis",
+  "name": "Have you note-this?",
+  "version": "1.0.0",
+  "author": "ablanco",
+  "description": "A deck of sticky notes docked to the right edge of every screen: a thin pill at rest, a shingled deck on approach, an editor in place.",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "NoteThis.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Notes",
+    "description": "Opens All Notes, and shows how many notes are in the deck",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showCount": true,
+      "glyph": "󰎞"
+    },
+    "schema": [
+      {
+        "key": "showCount",
+        "type": "bool",
+        "label": "Show the note count beside the glyph"
+      },
+      {
+        "key": "glyph",
+        "type": "string",
+        "label": "Bar glyph"
+      }
+    ]
+  }
+}
