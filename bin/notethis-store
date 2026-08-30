@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""notethis-store -- the local note store behind the Have you note-this? plugin.
+
+Runs as a long-lived child of omarchy-shell and speaks line-delimited JSON on
+stdin/stdout, so a keystroke-debounced save costs one write to an already-warm
+process rather than an interpreter start.
+
+  ->  {"id": 7, "op": "upsert", "args": {...}}
+  <-  {"id": 7, "ok": true, "result": {...}}
+
+Notes live in SQLite at $XDG_DATA_HOME/holdmynotes/notes.db. Title and body are
+sealed with ChaCha20-Poly1305 before they are written; colour, state, position
+and timestamps stay in the clear so the deck can sort and render without the
+key. The key itself lives in the login keyring (libsecret) and never in the
+database. Nothing here talks to the network.
+"""
+
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+import sqlite3
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import notethis_crypto  # noqa: E402
+
+APP = "notethis"
+# The plugin was called Hold My Notes before it was called Have you
+# note-this?. Notes written under the old name are still the same notes, and
+# the key that opens them is still the same key.
+LEGACY_APP = "holdmynotes"
+SCHEMA_VERSION = 1
+KEYRING_ATTRS = ["service", APP, "key", "master"]
+LEGACY_KEYRING_ATTRS = ["service", LEGACY_APP, "key", "master"]
+
+# Archives written before the rename still import: an export the user already
+# made is not something a new name gets to invalidate.
+STICKY_FORMAT = "notethis.stickies"
+LEGACY_STICKY_FORMAT = "holdmynotes.stickies"
+
+COLORS = ["yellow", "blue", "green", "purple", "pink", "orange"]
+DEFAULT_COLOR = "yellow"
+STATES = ("active", "archived")
+
+
+# --------------------------------------------------------------- locations
+
+def _base_dir(env, default):
+    return os.environ.get(env) or os.path.expanduser(default)
+
+
+def data_dir():
+    base = _base_dir("XDG_DATA_HOME", "~/.local/share")
+    path = os.path.join(base, APP)
+    legacy = os.path.join(base, LEGACY_APP)
+    # A rename, not a copy: the database, its WAL and any key file move
+    # together, and a half-migrated store is not a state worth supporting.
+    if not os.path.exists(path) and os.path.isdir(legacy):
+        os.rename(legacy, path)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def migrate_settings():
+    """Carry the user's settings.json over from the old name, once."""
+    base = _base_dir("XDG_CONFIG_HOME", "~/.config")
+    old = os.path.join(base, LEGACY_APP, "settings.json")
+    new = os.path.join(base, APP, "settings.json")
+    if not os.path.exists(old) or os.path.exists(new):
+        return False
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    shutil.copy2(old, new)
+    try:
+        os.remove(old)
+        os.rmdir(os.path.dirname(old))
+    except OSError:
+        pass  # something else lives there; leaving it is harmless
+    return True
+
+
+def db_path():
+    return os.environ.get("HOLDMYNOTES_DB") or os.path.join(data_dir(), "notes.db")
+
+
+# ------------------------------------------------------------------- key
+#
+# secret-tool is the libsecret CLI every Omarchy install already has for
+# gnome-keyring. When there is no keyring to talk to (a bare TTY session, a
+# container), we fall back to a 0600 key file and report `keyStorage: "file"`
+# so the UI can say so rather than pretend the key is protected.
+
+def _keyring_lookup(attrs=None):
+    try:
+        done = subprocess.run(["secret-tool", "lookup"] + (attrs or KEYRING_ATTRS),
+                              capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    try:
+        return base64.b64decode(done.stdout.strip(), validate=True)
+    except Exception:
+        return None
+
+
+def _keyring_store(key):
+    try:
+        done = subprocess.run(
+            ["secret-tool", "store", "--label=Have you note-this?"] + KEYRING_ATTRS,
+            input=base64.b64encode(key), capture_output=True, timeout=10)
+        return done.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _key_file():
+    return os.path.join(data_dir(), "master.key")
+
+
+def load_key():
+    """Return (key, storage) where storage is "keyring" or "file"."""
+    key = _keyring_lookup()
+    if key and len(key) == 32:
+        return key, "keyring"
+
+    # Notes written under the old name are sealed with the key stored under
+    # the old name. Re-store it, do not generate a new one -- a fresh key here
+    # would leave every existing note undecryptable.
+    legacy = _keyring_lookup(LEGACY_KEYRING_ATTRS)
+    if legacy and len(legacy) == 32:
+        _keyring_store(legacy)
+        return legacy, "keyring"
+
+    path = _key_file()
+    if os.path.exists(path):
+        with open(path, "rb") as handle:
+            key = base64.b64decode(handle.read().strip())
+        if len(key) == 32:
+            return key, "file"
+
+    key = os.urandom(32)
+    if _keyring_store(key):
+        return key, "keyring"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(base64.b64encode(key))
+    return key, "file"
+
+
+# ------------------------------------------------------------------ store
+
+class Store:
+    def __init__(self, path=None, key=None):
+        self.key, self.key_storage = (key, "test") if key else load_key()
+        self.db = sqlite3.connect(path or db_path())
+        self.db.row_factory = sqlite3.Row
+        self._migrate()
+
+    def _migrate(self):
+        self.db.executescript("""
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE IF NOT EXISTS notes (
+              id        TEXT PRIMARY KEY,
+              title_enc TEXT NOT NULL,
+              body_enc  TEXT NOT NULL,
+              color     TEXT NOT NULL,
+              state     TEXT NOT NULL DEFAULT 'active',
+              position  REAL NOT NULL,
+              created   INTEGER NOT NULL,
+              updated   INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)",
+                        (str(SCHEMA_VERSION),))
+        self.db.commit()
+
+    # -- crypto helpers. `aad` binds a field to its note id and column, so a
+    # -- blob cannot be moved between rows or between title and body.
+    def _seal(self, note_id, field, text):
+        aad = ("%s:%s" % (note_id, field)).encode()
+        return base64.b64encode(
+            notethis_crypto.seal(self.key, (text or "").encode(), aad)).decode()
+
+    def _unseal(self, note_id, field, blob):
+        if not blob:
+            return ""
+        aad = ("%s:%s" % (note_id, field)).encode()
+        try:
+            return notethis_crypto.open_sealed(
+                self.key, base64.b64decode(blob), aad).decode()
+        except Exception:
+            return ""
+
+    def _row_to_note(self, row):
+        return {
+            "id": row["id"],
+            "title": self._unseal(row["id"], "title", row["title_enc"]),
+            "body": self._unseal(row["id"], "body", row["body_enc"]),
+            "color": row["color"],
+            "state": row["state"],
+            "position": row["position"],
+            "created": row["created"],
+            "updated": row["updated"],
+        }
+
+    # ------------------------------------------------------------ queries
+    def list_notes(self):
+        rows = self.db.execute(
+            "SELECT * FROM notes ORDER BY position ASC, created ASC").fetchall()
+        return [self._row_to_note(row) for row in rows]
+
+    def get(self, note_id):
+        row = self.db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return self._row_to_note(row) if row else None
+
+    def _next_position(self):
+        row = self.db.execute("SELECT MAX(position) AS m FROM notes").fetchone()
+        return (row["m"] or 0) + 1
+
+    def create(self, title="", body="", color=None, state="active", note_id=None,
+               created=None, updated=None, position=None):
+        now = int(time.time())
+        note_id = note_id or uuid.uuid4().hex
+        color = color if color in COLORS else DEFAULT_COLOR
+        state = state if state in STATES else "active"
+        self.db.execute(
+            "INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (note_id, self._seal(note_id, "title", title),
+             self._seal(note_id, "body", body), color, state,
+             self._next_position() if position is None else position,
+             created or now, updated or now))
+        self.db.commit()
+        return self.get(note_id)
+
+    def update(self, note_id, fields):
+        note = self.get(note_id)
+        if not note:
+            return None
+        sets, values = [], []
+        for field in ("title", "body"):
+            if field in fields:
+                sets.append("%s_enc = ?" % field)
+                values.append(self._seal(note_id, field, fields[field]))
+        if fields.get("color") in COLORS:
+            sets.append("color = ?"); values.append(fields["color"])
+        if fields.get("state") in STATES:
+            sets.append("state = ?"); values.append(fields["state"])
+        if "position" in fields:
+            sets.append("position = ?"); values.append(float(fields["position"]))
+        if not sets:
+            return note
+        # An explicit `touch: false` keeps "edited" honest for changes the user
+        # did not type -- archiving, recolouring, reordering.
+        if fields.get("touch", True):
+            sets.append("updated = ?"); values.append(int(time.time()))
+        values.append(note_id)
+        self.db.execute("UPDATE notes SET %s WHERE id = ?" % ", ".join(sets), values)
+        self.db.commit()
+        return self.get(note_id)
+
+    def delete(self, note_id):
+        self.db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        self.db.commit()
+        return True
+
+    def reorder(self, ids):
+        for index, note_id in enumerate(ids):
+            self.db.execute("UPDATE notes SET position = ? WHERE id = ?",
+                            (float(index + 1), note_id))
+        self.db.commit()
+        return True
+
+    # ------------------------------------------------------ export/import
+    def export(self, ids, fmt, target):
+        notes = [self.get(i) for i in ids]
+        notes = [n for n in notes if n]
+        target = os.path.expanduser(target)
+        written = []
+        if fmt in ("markdown", "text"):
+            os.makedirs(target, exist_ok=True)
+            suffix = ".md" if fmt == "markdown" else ".txt"
+            for note in notes:
+                path = _unique_path(target, _slug(note["title"]) + suffix)
+                with open(path, "w") as handle:
+                    handle.write(_render_note(note, fmt))
+                written.append(path)
+        elif fmt == "single":
+            path = target if target.endswith(".md") else target + ".md"
+            with open(path, "w") as handle:
+                handle.write("\n\n---\n\n".join(_render_note(n, "markdown") for n in notes))
+            written.append(path)
+        elif fmt == "stickies":
+            path = target if target.endswith(".stickies") else target + ".stickies"
+            payload = {"format": STICKY_FORMAT, "version": 1,
+                       "exported": int(time.time()), "notes": notes}
+            with open(path, "w") as handle:
+                json.dump(payload, handle, indent=2)
+            written.append(path)
+        else:
+            raise ValueError("unknown export format: %s" % fmt)
+        return written
+
+    def import_stickies(self, path):
+        with open(os.path.expanduser(path)) as handle:
+            payload = json.load(handle)
+        if payload.get("format") not in (STICKY_FORMAT, LEGACY_STICKY_FORMAT):
+            raise ValueError("not a Have you note-this? archive")
+        imported = 0
+        for note in payload.get("notes", []):
+            # A re-import onto the same machine must not collide with the note
+            # already sitting in the deck, so a taken id becomes a fresh one.
+            note_id = note.get("id")
+            if not note_id or self.get(note_id):
+                note_id = None
+            self.create(title=note.get("title", ""), body=note.get("body", ""),
+                        color=note.get("color"), state=note.get("state", "active"),
+                        note_id=note_id, created=note.get("created"),
+                        updated=note.get("updated"))
+            imported += 1
+        return imported
+
+
+def _slug(title):
+    slug = re.sub(r"[^\w\s-]", "", (title or "").strip().lower())
+    slug = re.sub(r"[\s_-]+", "-", slug).strip("-")
+    return slug[:60] or "untitled-note"
+
+
+def _unique_path(directory, name):
+    path = os.path.join(directory, name)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(name)
+    for n in range(2, 1000):
+        candidate = os.path.join(directory, "%s-%d%s" % (stem, n, ext))
+        if not os.path.exists(candidate):
+            return candidate
+    return path
+
+
+def _render_note(note, fmt):
+    title = note["title"] or "Untitled note"
+    if fmt == "markdown":
+        return "# %s\n\n%s\n" % (title, note["body"])
+    return "%s\n%s\n\n%s\n" % (title, "=" * len(title), note["body"])
+
+
+# -------------------------------------------------------------------- rpc
+
+def handle(store, op, args):
+    if op == "hello":
+        return {"schema": SCHEMA_VERSION, "keyStorage": store.key_storage,
+                "db": db_path(), "colors": COLORS}
+    if op == "list":
+        return store.list_notes()
+    if op == "create":
+        return store.create(title=args.get("title", ""), body=args.get("body", ""),
+                            color=args.get("color"))
+    if op == "update":
+        return store.update(args["id"], args)
+    if op == "delete":
+        return store.delete(args["id"])
+    if op == "reorder":
+        return store.reorder(args.get("ids", []))
+    if op == "export":
+        return store.export(args.get("ids", []), args.get("format", "markdown"),
+                            args.get("target", "~"))
+    if op == "import":
+        return store.import_stickies(args["path"])
+    raise ValueError("unknown op: %s" % op)
+
+
+def serve():
+    migrate_settings()
+    store = Store()
+    out = sys.stdout
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except ValueError:
+            continue
+        response = {"id": request.get("id")}
+        try:
+            response["ok"] = True
+            response["result"] = handle(store, request.get("op"), request.get("args") or {})
+        except Exception as error:  # one bad call must not take the deck down
+            response["ok"] = False
+            response["error"] = "%s: %s" % (type(error).__name__, error)
+        out.write(json.dumps(response) + "\n")
+        out.flush()
+
+
+if __name__ == "__main__":
+    serve()
