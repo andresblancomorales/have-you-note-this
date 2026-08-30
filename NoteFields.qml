@@ -82,6 +82,27 @@ Item {
   // its note has something to size to.
   readonly property real bodyContentHeight: bodyField.contentHeight
 
+  // --------------------------------------------------------- checklists
+
+  // Flip the box on a line, from a click on its marker or from the caret.
+  // Written through the store like any other edit, so it lands in the same
+  // debounce and shows up wherever else the note is open.
+  function toggleCheckAt(position, markerOnly) {
+    if (!note || !store) return false
+    var next = Notes.toggleChecklistAt(bodyField.text, position, markerOnly)
+    if (next === null) return false
+    var caret = bodyField.cursorPosition
+    bodyField.text = next
+    // The flip is the same length, so the caret can go back where it was.
+    bodyField.cursorPosition = Math.min(caret, next.length)
+    saveTimer.restart()
+    return true
+  }
+
+  function toggleCheckAtCaret() {
+    return toggleCheckAt(bodyField.cursorPosition, false)
+  }
+
   function findNext() {
     var needle = findField.text.toLowerCase()
     if (needle === "") return
@@ -132,9 +153,16 @@ Item {
 
     Item {
       width: parent.width
-      height: Math.max(22, titleField.implicitHeight)
+      // Grows with the title, but only so far: on a small pinned card a
+      // rambling title should not push the writing off the paper.
+      height: Math.max(22, Math.min(titleField.implicitHeight,
+        Math.round(fields.titleSize * 3.6)))
+      clip: true
 
-      TextInput {
+      // A TextEdit, not a TextInput: a single line cut a long title off at the
+      // edge of the card with nothing to say it had. Titles wrap now, and
+      // Return still means "on to the body" rather than a newline.
+      TextEdit {
         id: titleField
         anchors {
           left: parent.left
@@ -148,6 +176,7 @@ Item {
         color: fields.ink
         selectionColor: Util.alpha(fields.rule, 0.6)
         selectedTextColor: fields.ink
+        wrapMode: TextEdit.Wrap
         clip: true
         onTextChanged: saveTimer.restart()
         Keys.onReturnPressed: bodyField.forceActiveFocus()
@@ -235,6 +264,27 @@ Item {
         // Keep the caret in view as the note grows past the card.
         onCursorRectangleChanged: bodyScroll.ensureVisible(cursorRectangle)
         Keys.onEscapePressed: fields.escaped()
+
+        // Ctrl+Return ticks the item the caret is on. Return itself has to
+        // stay a newline -- this is a text field first.
+        Keys.onPressed: function(event) {
+          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+              && (event.modifiers & Qt.ControlModifier)) {
+            fields.toggleCheckAtCaret()
+            event.accepted = true
+          }
+        }
+
+        // A tap on the "- [ ]" itself ticks it. Declared before the field's
+        // own handlers would place the caret, and it only claims the tap when
+        // the box is what was hit -- everywhere else the click is a caret.
+        TapHandler {
+          gesturePolicy: TapHandler.ReleaseWithinBounds
+          onTapped: function(point) {
+            var position = bodyField.positionAt(point.position.x, point.position.y)
+            fields.toggleCheckAt(position, true)
+          }
+        }
 
         Text {
           anchors.fill: parent

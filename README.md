@@ -81,6 +81,7 @@ the card says so while the caret is in it:
 | `Esc` | Close the note (or the find bar) |
 | `Ctrl + F` | Find in note; `Enter` walks the matches, wrapping |
 | `Ctrl + .` | Cycle its colour |
+| `Ctrl + P` | Keep it on top, or take it back |
 | `Ctrl + Shift + A` | Archive it |
 | `Ctrl + Backspace` | Delete it — press twice, then ten seconds to undo |
 
@@ -100,6 +101,54 @@ so it cannot drift from the truth.
 Right-click the pill or any tab for the same actions plus **Show over
 full-screen apps**, which moves the deck from Hyprland's `top` layer to
 `overlay` so a full-screen window no longer covers it.
+
+## Checklists
+
+A note is a list most of the time, so `- [ ]` and `- [x]` are understood in the
+body. Click the box to tick it, or `Ctrl + Return` ticks the one the caret is
+on. They are stored as the markdown they look like, so an exported note is
+still a checklist wherever it lands.
+
+What that buys is the count: a deck tab carries a thin progress bar along its
+edge and the All Notes row reads `3/7`, so a deck of half-done lists says so
+without being opened.
+
+## Notes kept on top
+
+An open note has a pin in its button row and answers `Ctrl + P`; the same key
+takes it back. Right-click a tab and **Keep on top** does the same. The note
+leaves the deck and floats above your windows, where you drag it wherever you
+want it. It edits in place like any other note, and the button in its corner
+puts it back in the deck.
+
+The wallpaper would be the prettier metaphor — a sticky note belongs on the
+desk, not on the work — and that is where this started, on the bottom layer.
+It was wrong: on a tiling window manager the desktop is covered nearly all of
+the time, so a note stuck to it is a note you never see. It sits on the top
+layer now, and still under fullscreen windows, so a video or a game gets the
+screen to itself.
+
+Drag it by the grip at its top, or by the margin around the writing. Not by
+the writing itself: inside a note a press is a caret, and the text field takes
+it first — which is why the note would not move at all until the grip existed.
+
+A pinned note leaves the deck while it is up; being in both places at once
+would just be the same note twice. Its window is keyed by the note's id rather
+than by the note itself — a note object is replaced on every write, twice per
+save, and a window keyed to that object was torn down and rebuilt each time,
+which is how typing in a pinned note made it blink and drop the caret. Pinning also folds the deck away — the note
+went to the top of the screen, and a deck left fanned open behind it is state
+nobody asked to keep.
+
+Unpinning says so without opening anything: the note names itself beside its
+dash on the resting pill for a couple of seconds, and the pill scrolls to it if
+it landed out of sight. The deck fans out when the pointer reaches for it, and
+a note coming back is not the pointer asking for anything.
+
+The dash nudging on its own was the first attempt, and it was invisible in
+practice — seven pixels for a fifth of a second, at the edge of the screen,
+while the eye is on the middle of it where the note just vanished from. Its position is remembered per screen, and
+a note whose screen is gone comes back on the first one rather than nowhere.
 
 ## The bar button
 
@@ -127,6 +176,17 @@ them is destructive and only that one looks it: delete is a red bin, set
 apart from the others; archive is a box with an arrow going into it, because
 next to a delete button anything bin-shaped reads as "this destroys the
 note".
+
+A tab is only as long as the deck lets it be, so its rotated label runs to two
+lines before it elides, and hovering shows the whole title in a tooltip — but
+only when there is more of it to show. In an open note the title wraps rather
+than running off the edge of the card. No marquee: text that moves on its own
+at the edge of the screen is the one thing you cannot ignore, and it makes you
+wait to read what a tooltip says at once.
+
+Hovering a tab pulls it a little out of the deck — the same movement the
+keyboard cursor makes, so pointing and arrowing feel like one gesture rather
+than two conventions.
 
 The deck holds as many notes as the screen can fit — fourteen on a 1440px
 display, fewer on a laptop panel — and puts the rest behind a `+N` tile you
@@ -241,7 +301,8 @@ checked against the RFC 8439 vectors in `tests/test_crypto.py`.
 | `DeckWindow.qml` | One screen's layer surface: pill, fan, editor placement, menu |
 | `BarWidget.qml` | The bar button: note count, opens All Notes |
 | `NoteEditor.qml` | The open note's card: tab, rule, actions |
-| `NoteFields.qml` | Title, body, find bar and autosave — shared by both editors |
+| `NoteFields.qml` | Title, body, find bar, checklists and autosave — shared by every editor |
+| `PinnedNote.qml` | A note kept above the windows, on the top layer |
 | `AllNotes.qml` | The All Notes browser window |
 | `Store.qml` | The helper process, seen from QML |
 | `Notes.js` | Palette, search, previews, dates — pure, and unit tested |

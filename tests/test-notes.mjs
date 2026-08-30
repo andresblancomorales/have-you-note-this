@@ -13,7 +13,9 @@ const Notes = new Function(`${source}; return {
   palette, cycleColor, suggestColor, titleOf, previewOf, tagsOf, matches,
   filterNotes, activeNotes, byRecency, indexOfId, findById, relativeTime,
   formatDate, formatShortDate, deckSlice, orderDeck, autoDeckLimit,
-  sortNotes, sortsFor, COLOR_ORDER, DECK_ORDERS, LIST_SORTS }`)()
+  sortNotes, sortsFor, checklist, lineRangeAt, toggleChecklistAt,
+  isPinned, deckCandidates, pinnedNotes,
+  COLOR_ORDER, DECK_ORDERS, LIST_SORTS }`)()
 
 const note = (over = {}) => ({
   id: "n1", title: "", body: "", color: "yellow", state: "active",
@@ -221,4 +223,87 @@ test("sortsFor drops deck order on the archive tab", () => {
   assert.deepEqual(Notes.sortsFor("all"), Notes.LIST_SORTS)
   assert.deepEqual(Notes.sortsFor("active"), Notes.LIST_SORTS)
   assert.ok(!Notes.sortsFor("archived").includes("deck"))
+})
+
+test("checklist counts the boxes and the ticked ones", () => {
+  const body = "- [ ] uno\n- [x] dos\n  - [X] tres\n* [ ] cuatro\nno es un item"
+  assert.deepEqual(Notes.checklist(note({ body })), { total: 4, done: 2 })
+})
+
+test("checklist is zero for a note without boxes", () => {
+  assert.deepEqual(Notes.checklist(note({ body: "solo texto" })), { total: 0, done: 0 })
+  assert.deepEqual(Notes.checklist(note()), { total: 0, done: 0 })
+  assert.deepEqual(Notes.checklist(null), { total: 0, done: 0 })
+})
+
+test("checklist ignores a bracket that is not a box", () => {
+  assert.deepEqual(Notes.checklist(note({ body: "- [todo] cosa\n- [] otra" })),
+    { total: 0, done: 0 })
+})
+
+test("toggleChecklistAt flips the item under the position", () => {
+  const body = "- [ ] uno\n- [x] dos"
+  assert.equal(Notes.toggleChecklistAt(body, 2, false), "- [x] uno\n- [x] dos")
+  assert.equal(Notes.toggleChecklistAt(body, 12, false), "- [ ] uno\n- [ ] dos")
+})
+
+test("toggleChecklistAt keeps the indent and the rest of the line", () => {
+  const body = "  - [ ] con sangría y texto"
+  assert.equal(Notes.toggleChecklistAt(body, 4, false), "  - [x] con sangría y texto")
+})
+
+test("toggleChecklistAt returns null on a line with no box", () => {
+  assert.equal(Notes.toggleChecklistAt("solo texto", 3, false), null)
+  assert.equal(Notes.toggleChecklistAt("", 0, false), null)
+})
+
+test("a click only ticks when it lands on the marker", () => {
+  const body = "- [ ] una tarea larga"
+  // Inside "- [ ] " -> ticks.
+  assert.equal(Notes.toggleChecklistAt(body, 3, true), "- [x] una tarea larga")
+  // Out in the words -> left alone, or typing would tick things by accident.
+  assert.equal(Notes.toggleChecklistAt(body, 15, true), null)
+})
+
+test("toggleChecklistAt does not disturb the other lines", () => {
+  const body = "encabezado\n- [ ] uno\n- [ ] dos\npie"
+  assert.equal(Notes.toggleChecklistAt(body, 14, false),
+    "encabezado\n- [x] uno\n- [ ] dos\npie")
+})
+
+test("lineRangeAt finds the line around a position", () => {
+  const body = "abc\ndefg\nhi"
+  assert.deepEqual(Notes.lineRangeAt(body, 0), { start: 0, end: 3 })
+  assert.deepEqual(Notes.lineRangeAt(body, 6), { start: 4, end: 8 })
+  assert.deepEqual(Notes.lineRangeAt(body, 99), { start: 9, end: 11 })
+})
+
+test("a pinned note leaves the deck", () => {
+  const notes = [
+    note({ id: "deck" }),
+    note({ id: "wall", pinned: true }),
+  ]
+  assert.deepEqual(Notes.deckCandidates(notes).map((n) => n.id), ["deck"])
+  assert.deepEqual(Notes.orderDeck(notes).map((n) => n.id), ["deck"])
+})
+
+test("pinnedNotes returns what is stuck to the desktop, archived excluded", () => {
+  const notes = [
+    note({ id: "a", pinned: true }),
+    note({ id: "b" }),
+    note({ id: "c", pinned: true, state: "archived" }),
+  ]
+  assert.deepEqual(Notes.pinnedNotes(notes).map((n) => n.id), ["a"])
+})
+
+test("isPinned copes with a note from before the column existed", () => {
+  assert.equal(Notes.isPinned(note()), false)
+  assert.equal(Notes.isPinned(null), false)
+  assert.equal(Notes.isPinned(note({ pinned: true })), true)
+})
+
+test("activeNotes still counts a pinned note as active", () => {
+  // The deck excludes it; the count of what is not archived should not.
+  const notes = [note({ id: "a", pinned: true }), note({ id: "b" })]
+  assert.deepEqual(Notes.activeNotes(notes).map((n) => n.id), ["a", "b"])
 })

@@ -27,9 +27,23 @@ PanelWindow {
     ? store.note(host.openNoteId) : null
 
   // Fanned while the pointer is over this deck, or while this screen holds
-  // the open note. `pinned` survives the pointer wandering off the tabs.
+  // the open note. `deckHeld` survives the pointer wandering off the tabs.
   readonly property bool fanned: (host && host.hoveredScreen === screenName)
-    || (host && host.pinned && isOpenScreen)
+    || (host && host.deckHeld && isOpenScreen)
+
+  // The tab of a note just returned from the top of the screen.
+  readonly property string peekId: (host && host.peekScreen === screenName)
+    ? host.peekNoteId : ""
+
+  // A returning note that landed outside the tabs on screen is a peek that
+  // shows nothing, so the deck scrolls to it.
+  onPeekIdChanged: {
+    if (peekId === "") return
+    var index = Notes.indexOfId(orderedNotes, peekId)
+    if (index === -1) return
+    if (index < deckOffset) deckOffset = index
+    else if (index >= deckOffset + effectiveLimit) deckOffset = index - effectiveLimit + 1
+  }
 
   // Once the user has clicked into the open note, walking the pointer away
   // must not yank it shut mid-sentence.
@@ -295,8 +309,26 @@ PanelWindow {
           readonly property color inkColor: paper.ink
           readonly property color ruleColor: paper.rule
           readonly property bool isOpen: win.host && win.host.openNoteId === modelData.id
-          readonly property bool cursored: win.keyboardDriving
-            && win.cursorIndex === win.deckOffset + index
+          // The pointer gets the same answer as the keyboard: the tab under it
+          // starts out of the deck, so hovering and arrowing feel like one
+          // gesture rather than two conventions.
+          readonly property bool cursored: (win.keyboardDriving
+            && win.cursorIndex === win.deckOffset + index)
+            || (win.fanned && tabHover.hovered)
+
+          // A note just back from the top of the screen says so from the
+          // resting pill: its dash nudges out of the lozenge a few times and
+          // settles. Nothing opens, nothing is left open -- the deck answers
+          // the pointer, and this is not the pointer asking.
+          readonly property bool peeking: win.peekId === modelData.id
+          property real peekNudge: 0
+
+          SequentialAnimation on peekNudge {
+            running: tab.peeking
+            loops: 3
+            NumberAnimation { to: 7; duration: 230; easing.type: Easing.OutCubic }
+            NumberAnimation { to: 0; duration: 230; easing.type: Easing.InCubic }
+          }
 
           width: win.fanned ? win.tabWidth : win.dashWidth
           height: win.fanned ? win.tabHeight : win.dashHeight
@@ -321,8 +353,9 @@ PanelWindow {
             id: tabPaper
             anchors.fill: parent
             // The cursor starts the tab out of the deck: the same movement
-            // opening it finishes, so the highlight means something.
-            anchors.leftMargin: tab.cursored ? -10 : 0
+            // opening it finishes, so the highlight means something. The peek
+            // borrows the same movement, in smaller strokes.
+            anchors.leftMargin: tab.cursored ? -10 : -tab.peekNudge
             // Flush to the screen edge: only the left corners are rounded.
             topLeftRadius: win.fanned ? 12 : 4
             bottomLeftRadius: win.fanned ? 12 : 4
@@ -352,7 +385,33 @@ PanelWindow {
             color: Util.alpha(tab.ruleColor, 0.6)
           }
 
+          // A thin bar of progress along the tab's edge. A deck of half-done
+          // lists should say so without being opened.
+          Item {
+            id: tabProgress
+            readonly property var counts: Notes.checklist(tab.modelData)
+            visible: win.fanned && counts.total > 0
+            height: 3
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom
+              leftMargin: 6; rightMargin: 6; bottomMargin: 5 }
+
+            Rectangle {
+              anchors.fill: parent
+              radius: 1.5
+              color: Util.alpha(tab.inkColor, 0.18)
+            }
+
+            Rectangle {
+              height: parent.height
+              width: parent.width * (tabProgress.counts.done / Math.max(1, tabProgress.counts.total))
+              radius: 1.5
+              color: Util.alpha(tab.inkColor, 0.65)
+              Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            }
+          }
+
           Text {
+            id: tabLabel
             visible: win.fanned
             opacity: win.fanned ? 1 : 0
             anchors.centerIn: parent
@@ -362,7 +421,13 @@ PanelWindow {
             horizontalAlignment: Text.AlignHCenter
             text: Notes.titleOf(tab.modelData).toUpperCase()
             elide: Text.ElideRight
-            maximumLineCount: 1
+            // Two lines, not one. A tab is only as long as the deck lets it
+            // be, and at 11px with this letter spacing that was about twelve
+            // characters -- enough to cut "Presupuesto trimestral" down to
+            // "PRESUPUESTO…", which names nothing. Rotated, a second line
+            // costs width the 46px tab has to spare.
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
             color: Util.alpha(tab.inkColor, 0.7)
             font.family: Style.font.family
             font.pixelSize: 11
@@ -371,10 +436,63 @@ PanelWindow {
             Behavior on opacity { NumberAnimation { duration: 120 } }
           }
 
+          HoverHandler { id: tabHover }
+
+          // A tab is as tall as the deck lets it be, so a long title elides.
+          // The whole of it on hover, and only when there is more to show --
+          // a tooltip that repeats what you can already read is noise.
+          PanelToolTip {
+            visible: win.fanned && tabHover.hovered && tabLabel.truncated
+            text: Notes.titleOf(tab.modelData)
+          }
+
           TapHandler {
             gesturePolicy: TapHandler.ReleaseWithinBounds
             acceptedButtons: Qt.LeftButton
             onTapped: win.noteTapped(tab.modelData.id)
+          }
+
+          // A note that just came back from the top of the screen names itself
+          // beside its dash for a moment. The dash nudging on its own was too
+          // small to notice from where the eye actually is.
+          Rectangle {
+            id: peekChip
+            visible: tab.peeking && !win.fanned
+            anchors { right: parent.left; rightMargin: 10 + tab.peekNudge
+              verticalCenter: parent.verticalCenter }
+            width: Math.min(220, peekLabel.implicitWidth + 18)
+            height: 24
+            radius: 7
+            color: tab.paperColor
+            opacity: tab.peeking ? 1 : 0
+
+            layer.enabled: true
+            layer.effect: MultiEffect {
+              shadowEnabled: true
+              shadowBlur: 0.6
+              shadowOpacity: 0.35
+            }
+
+            // Slides out of the edge, the same direction the deck fans.
+            transform: Translate {
+              x: tab.peeking ? 0 : 24
+              Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            }
+
+            Behavior on opacity { NumberAnimation { duration: 200 } }
+
+            Text {
+              id: peekLabel
+              anchors { fill: parent; leftMargin: 9; rightMargin: 9 }
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+              text: Notes.titleOf(tab.modelData)
+              color: Util.alpha(tab.inkColor, 0.85)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+              elide: Text.ElideRight
+            }
           }
 
           TapHandler {
@@ -644,6 +762,7 @@ PanelWindow {
           if (menuPopup.noteId !== "") {
             items.push({ label: win.host.t("menu.openNote"), action: "open" })
             items.push({ label: win.host.t("menu.cycleColour"), action: "color" })
+            items.push({ label: win.host.t("menu.pinNote"), action: "pin" })
             items.push({ label: win.host.t("menu.archiveNote"), action: "archive" })
             items.push({ label: win.host.t("menu.deleteNote"), action: "delete", danger: true })
             items.push({ label: "", action: "" })
@@ -763,28 +882,36 @@ PanelWindow {
             gesturePolicy: TapHandler.ReleaseWithinBounds
             enabled: menuRow.modelData.action !== ""
             onTapped: {
+              // Everything this handler needs is taken before the menu is
+              // dismissed. Dismissing clears `noteId`, which recomputes the
+              // menu model, which destroys this very row -- and a handler
+              // running inside a destroyed item can no longer see `win`, so
+              // every action after the dismiss threw instead of running.
+              var deck = win
+              var host = win.host
               var action = menuRow.modelData.action
               var id = menuPopup.noteId
               menuPopup.dismiss()
-              if (action === "open") win.noteTapped(id)
-              else if (action === "color") win.store.cycleColor(id)
-              else if (action === "archive") win.host.archiveNote(id)
-              else if (action === "delete") win.host.deleteNote(id)
-              else if (action === "new") win.host.newNote()
-              else if (action === "all") win.host.showAllNotes("all")
-              else if (action === "archived") win.host.showAllNotes("archived")
-              else if (action === "shortcuts") win.host.showShortcuts()
-              else if (action === "about") win.host.showAbout()
+              if (action === "open") deck.noteTapped(id)
+              else if (action === "color") deck.store.cycleColor(id)
+              else if (action === "pin") host.pinNote(id)
+              else if (action === "archive") host.archiveNote(id)
+              else if (action === "delete") host.deleteNote(id)
+              else if (action === "new") host.newNote()
+              else if (action === "all") host.showAllNotes("all")
+              else if (action === "archived") host.showAllNotes("archived")
+              else if (action === "shortcuts") host.showShortcuts()
+              else if (action === "about") host.showAbout()
               else if (action === "fullscreen") {
-                win.host.overFullscreen = !win.host.overFullscreen
-                win.host.saveSettings()
+                host.overFullscreen = !host.overFullscreen
+                host.saveSettings()
               }
               else if (action.indexOf("lang:") === 0) {
-                win.host.setLanguage(action.substring(5))
+                host.setLanguage(action.substring(5))
               }
               else if (action.indexOf("order:") === 0) {
-                win.deckOffset = 0
-                win.host.setDeckOrder(action.substring(6))
+                deck.deckOffset = 0
+                host.setDeckOrder(action.substring(6))
               }
             }
           }

@@ -34,7 +34,7 @@ APP = "notethis"
 # note-this?. Notes written under the old name are still the same notes, and
 # the key that opens them is still the same key.
 LEGACY_APP = "holdmynotes"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 KEYRING_ATTRS = ["service", APP, "key", "master"]
 LEGACY_KEYRING_ATTRS = ["service", LEGACY_APP, "key", "master"]
 
@@ -162,6 +162,25 @@ class Store:
         self._migrate()
 
     def _migrate(self):
+        self._create()
+        self._add_missing_columns()
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)",
+                        (str(SCHEMA_VERSION),))
+        self.db.commit()
+
+    # Columns added after v1 are patched onto an existing database rather than
+    # rebuilt into a new one: the rows are encrypted, and the less this code
+    # moves them around the fewer ways there are to lose them.
+    def _add_missing_columns(self):
+        have = {row[1] for row in self.db.execute("PRAGMA table_info(notes)")}
+        for name, spec in (("pinned", "INTEGER NOT NULL DEFAULT 0"),
+                           ("pin_x", "REAL NOT NULL DEFAULT 80"),
+                           ("pin_y", "REAL NOT NULL DEFAULT 80"),
+                           ("pin_screen", "TEXT NOT NULL DEFAULT ''")):
+            if name not in have:
+                self.db.execute("ALTER TABLE notes ADD COLUMN %s %s" % (name, spec))
+
+    def _create(self):
         self.db.executescript("""
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS notes (
@@ -176,9 +195,6 @@ class Store:
             );
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
-        self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)",
-                        (str(SCHEMA_VERSION),))
-        self.db.commit()
 
     # -- crypto helpers. `aad` binds a field to its note id and column, so a
     # -- blob cannot be moved between rows or between title and body.
@@ -207,6 +223,12 @@ class Store:
             "position": row["position"],
             "created": row["created"],
             "updated": row["updated"],
+            # A pinned note is stuck to the desktop instead of sitting in the
+            # deck; the coordinates are where the user dropped it.
+            "pinned": bool(row["pinned"]),
+            "pinX": row["pin_x"],
+            "pinY": row["pin_y"],
+            "pinScreen": row["pin_screen"],
         }
 
     # ------------------------------------------------------------ queries
@@ -230,7 +252,8 @@ class Store:
         color = color if color in COLORS else DEFAULT_COLOR
         state = state if state in STATES else "active"
         self.db.execute(
-            "INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO notes (id, title_enc, body_enc, color, state, position,"
+            " created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (note_id, self._seal(note_id, "title", title),
              self._seal(note_id, "body", body), color, state,
              self._next_position() if position is None else position,
@@ -253,6 +276,13 @@ class Store:
             sets.append("state = ?"); values.append(fields["state"])
         if "position" in fields:
             sets.append("position = ?"); values.append(float(fields["position"]))
+        if "pinned" in fields:
+            sets.append("pinned = ?"); values.append(1 if fields["pinned"] else 0)
+        for field, column in (("pinX", "pin_x"), ("pinY", "pin_y")):
+            if field in fields:
+                sets.append("%s = ?" % column); values.append(float(fields[field]))
+        if "pinScreen" in fields:
+            sets.append("pin_screen = ?"); values.append(str(fields["pinScreen"]))
         if not sets:
             return note
         # An explicit `touch: false` keeps "edited" honest for changes the user

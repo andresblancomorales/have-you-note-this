@@ -5,6 +5,7 @@ import importlib.util
 import importlib.machinery
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -164,6 +165,79 @@ class StoreTest(unittest.TestCase):
             json.dump({"format": "something.else"}, handle)
         with self.assertRaises(ValueError):
             self.store.import_stickies(path)
+
+
+class PinningTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "notes.db")
+        self.store = store_module.Store(self.path, key=TEST_KEY)
+
+    def tearDown(self):
+        self.store.db.close()
+        self.dir.cleanup()
+
+    def test_a_new_note_is_not_pinned(self):
+        note = self.store.create(title="x")
+        self.assertFalse(note["pinned"])
+        self.assertEqual(note["pinScreen"], "")
+
+    def test_pinning_carries_a_place_to_stick_it(self):
+        note = self.store.create(title="x")
+        pinned = self.store.update(note["id"], {
+            "pinned": True, "pinX": 420.0, "pinY": 96.5, "pinScreen": "DP-1"})
+        self.assertTrue(pinned["pinned"])
+        self.assertEqual(pinned["pinX"], 420.0)
+        self.assertEqual(pinned["pinY"], 96.5)
+        self.assertEqual(pinned["pinScreen"], "DP-1")
+
+    def test_unpinning_leaves_the_note_alone(self):
+        note = self.store.create(title="x", body="cuerpo")
+        self.store.update(note["id"], {"pinned": True, "pinX": 10, "pinY": 20})
+        back = self.store.update(note["id"], {"pinned": False})
+        self.assertFalse(back["pinned"])
+        self.assertEqual(back["body"], "cuerpo")
+
+    def test_moving_a_pin_does_not_count_as_editing(self):
+        note = self.store.create(title="x")
+        self.store.db.execute("UPDATE notes SET updated = 1000 WHERE id = ?", (note["id"],))
+        moved = self.store.update(note["id"], {"pinX": 5, "pinY": 6, "touch": False})
+        self.assertEqual(moved["updated"], 1000)
+
+
+class SchemaUpgradeTest(unittest.TestCase):
+    """A v1 database has to gain the pin columns without losing its notes."""
+
+    def test_v1_database_is_upgraded_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notes.db")
+
+            # Build a database exactly as version 1 shipped it.
+            legacy = sqlite3.connect(path)
+            legacy.executescript("""
+                CREATE TABLE notes (
+                  id TEXT PRIMARY KEY, title_enc TEXT NOT NULL, body_enc TEXT NOT NULL,
+                  color TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active',
+                  position REAL NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO meta VALUES ('schema', '1');
+            """)
+            legacy.commit()
+            legacy.close()
+
+            seed = store_module.Store(path, key=TEST_KEY)
+            note = seed.create(title="vieja", body="sigue acá")
+            seed.db.close()
+
+            upgraded = store_module.Store(path, key=TEST_KEY)
+            kept = upgraded.get(note["id"])
+            self.assertEqual(kept["title"], "vieja")
+            self.assertEqual(kept["body"], "sigue acá")
+            self.assertFalse(kept["pinned"])
+            schema = upgraded.db.execute(
+                "SELECT value FROM meta WHERE key = 'schema'").fetchone()[0]
+            self.assertEqual(schema, str(store_module.SCHEMA_VERSION))
+            upgraded.db.close()
 
 
 class LegacyMigrationTest(unittest.TestCase):
