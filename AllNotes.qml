@@ -121,6 +121,7 @@ FloatingWindow {
         { keys: "Esc", what: host.t("keys.escNote") },
         { keys: "Ctrl + F", what: host.t("keys.find") },
         { keys: "Ctrl + .", what: host.t("keys.colour") },
+        { keys: "Ctrl + P", what: host.t("keys.pinIt") },
         { keys: "Ctrl + Shift + A", what: host.t("keys.archiveIt") },
         { keys: "Ctrl + Backspace", what: host.t("keys.deleteIt") },
         { keys: "Tab", what: host.t("keys.titleToBody") }
@@ -178,6 +179,17 @@ FloatingWindow {
   }
 
   readonly property int targetCount: targetIds.length
+
+  // Same rule as archive: a selection that is entirely stuck down offers to
+  // unstick it, anything else offers to stick it.
+  readonly property bool targetsAllPinned: {
+    if (!store || targetIds.length === 0) return false
+    for (var i = 0; i < targetIds.length; i++) {
+      var note = store.note(targetIds[i])
+      if (!note || !note.pinned) return false
+    }
+    return true
+  }
 
   // A selection of archived notes offers to put them back; anything else --
   // active notes, or a mix -- offers to take them off the deck.
@@ -605,6 +617,19 @@ FloatingWindow {
               elide: Text.ElideRight
             }
 
+            // "3/7" beside the state, only for notes that are lists.
+            Text {
+              id: rowChecks
+              readonly property var counts: Notes.checklist(row.modelData)
+              visible: counts.total > 0
+              anchors { right: rowChip.left; rightMargin: 8; top: parent.top; topMargin: 11 }
+              text: counts.done + "/" + counts.total
+              color: counts.done === counts.total ? Util.alpha(Color.accent, 0.9) : window.inkSoft
+              font.family: Style.font.family
+              font.pixelSize: 10
+              font.bold: true
+            }
+
             Text {
               id: rowChip
               anchors { right: rowTime.left; rightMargin: 10; top: parent.top; topMargin: 11 }
@@ -723,6 +748,19 @@ FloatingWindow {
             id: actionRow
             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
             spacing: 8
+
+            AllNotesButton {
+              label: window.actionLabel(window.host.t(window.targetsAllPinned
+                ? "all.action.unpin" : "all.action.pin"))
+              ink: window.ink
+              enabled: window.targetCount > 0
+              onClicked: {
+                var ids = window.targetIds
+                if (window.targetsAllPinned) window.host.unpinNotes(ids)
+                else window.host.pinNotes(ids)
+                window.checkedIds = []
+              }
+            }
 
             AllNotesButton {
               label: window.actionLabel(window.host.t(window.targetsAllArchived

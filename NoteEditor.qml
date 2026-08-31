@@ -96,18 +96,27 @@ Item {
       anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
 
       Text {
+        id: tabLabel
         anchors.centerIn: parent
         rotation: -90
         width: card.height - editor.pad * 2
         horizontalAlignment: Text.AlignHCenter
         text: Notes.titleOf(editor.note).toUpperCase()
         elide: Text.ElideRight
-        maximumLineCount: 1
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
         color: Util.alpha(editor.inkColor, 0.65)
         font.family: Style.font.family
         font.pixelSize: 11
         font.letterSpacing: 2
         font.bold: true
+      }
+
+      HoverHandler { id: tabStripHover }
+
+      PanelToolTip {
+        visible: tabStripHover.hovered && tabLabel.truncated
+        text: Notes.titleOf(editor.note)
       }
     }
 
@@ -165,6 +174,10 @@ Item {
           // A box with an arrow going into it, not the lidded bin the plain
           // archive glyph draws -- next to a delete button, anything bin
           // shaped reads as "this destroys the note".
+          { glyph: editor.note && editor.note.pinned ? "󰐄" : "󰐃",
+            tip: editor.host.t(editor.note && editor.note.pinned
+              ? "note.action.unpin" : "note.action.pin"),
+            action: "pin", danger: false, gap: false },
           { glyph: "󱉚", tip: editor.host.t("note.action.archive"),
             action: "archive", danger: false, gap: false },
           // The bin belongs here, and only here, in red and set apart: the
@@ -226,6 +239,7 @@ Item {
               onTapped: {
                 if (!editor.note) return
                 if (actionSlot.modelData.action === "color") editor.store.cycleColor(editor.note.id)
+                else if (actionSlot.modelData.action === "pin") editor.host.togglePin(editor.note.id)
                 else if (actionSlot.modelData.action === "archive") editor.host.archiveNote(editor.note.id)
                 else editor.requestDelete()
               }
@@ -268,6 +282,11 @@ Item {
     sequences: ["Ctrl+Backspace"]
     enabled: editor.visible
     onActivated: editor.requestDelete()
+  }
+  Shortcut {
+    sequences: ["Ctrl+P"]
+    enabled: editor.visible
+    onActivated: if (editor.note) editor.host.togglePin(editor.note.id)
   }
   Shortcut {
     sequences: ["Ctrl+Shift+A"]

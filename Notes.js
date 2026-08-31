@@ -57,6 +57,51 @@ function previewOf(note) {
   return body
 }
 
+// Checklists. A sticky note is a list most of the time, so `- [ ]` and `- [x]`
+// are understood in the body -- stored as the markdown they are, so an export
+// is still a checklist wherever it lands.
+var CHECK_ITEM = /^(\s*[-*]\s\[)([ xX])(\]\s?)/
+
+function checklist(note) {
+  var lines = ((note && note.body) || "").split("\n")
+  var total = 0, done = 0
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(CHECK_ITEM)
+    if (!match) continue
+    total += 1
+    if (match[2] !== " ") done += 1
+  }
+  return { total: total, done: done }
+}
+
+// Bounds of the line containing `position`, so a click or a caret can be
+// resolved to the item it is sitting in.
+function lineRangeAt(body, position) {
+  var text = body || ""
+  var at = Math.max(0, Math.min(position || 0, text.length))
+  var start = text.lastIndexOf("\n", at - 1) + 1
+  var end = text.indexOf("\n", at)
+  return { start: start, end: end === -1 ? text.length : end }
+}
+
+// Flip the box on the line under `position`. Returns null when that line is
+// not a checklist item, so callers can leave the click alone.
+//
+// `markerOnly` is what a click passes: only a hit inside the "- [ ]" itself
+// counts, or typing in the text would tick things by accident. The keyboard
+// path passes false, because the caret is already a deliberate choice of line.
+function toggleChecklistAt(body, position, markerOnly) {
+  var text = body || ""
+  var range = lineRangeAt(text, position)
+  var line = text.substring(range.start, range.end)
+  var match = line.match(CHECK_ITEM)
+  if (!match) return null
+  if (markerOnly && (position - range.start) > match[0].length) return null
+  var flipped = match[1] + (match[2] === " " ? "x" : " ") + match[3]
+  return text.substring(0, range.start) + flipped + line.substring(match[0].length)
+    + text.substring(range.end)
+}
+
 function tagsOf(note) {
   var found = []
   var source = ((note && note.body) || "") + " " + ((note && note.title) || "")
@@ -100,6 +145,26 @@ function filterNotes(notes, query, state) {
 
 function activeNotes(notes) {
   return filterNotes(notes, "", "active")
+}
+
+// A pinned note is stuck to the desktop, so it leaves the deck -- being in
+// both places at once would just be the same note twice.
+function isPinned(note) {
+  return !!(note && note.pinned)
+}
+
+function deckCandidates(notes) {
+  var out = []
+  for (var i = 0; i < notes.length; i++)
+    if (notes[i].state === "active" && !isPinned(notes[i])) out.push(notes[i])
+  return out
+}
+
+function pinnedNotes(notes) {
+  var out = []
+  for (var i = 0; i < notes.length; i++)
+    if (isPinned(notes[i]) && notes[i].state !== "archived") out.push(notes[i])
+  return out
 }
 
 // How the All Notes list is ordered. Separate from the deck's own order: the
@@ -187,7 +252,7 @@ function formatShortDate(epochSeconds, months) {
 //           up the deck would rearrange
 //   oldest  first written first, for a deck used as a queue
 function orderDeck(notes, order) {
-  var active = activeNotes(notes)
+  var active = deckCandidates(notes)
   if (order === "manual") return active
   if (order === "oldest")
     return active.slice().sort(function(a, b) { return (a.created || 0) - (b.created || 0) })

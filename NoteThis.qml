@@ -33,9 +33,11 @@ Item {
   // The screen whose deck is fanned. Set by whichever DeckWindow the pointer
   // entered; cleared when it leaves.
   property string hoveredScreen: ""
-  // Held open regardless of the pointer -- set while a note is open, while a
-  // menu is up, and by the toggle shortcut.
-  property bool pinned: false
+  // The deck held open regardless of the pointer -- while a note is open,
+  // while a menu is up, and by the toggle shortcut. Named for what it does to
+  // the deck: `note.pinned` is a different thing entirely, a note kept above
+  // the windows, and the two read alike in a hurry.
+  property bool deckHeld: false
 
   // True when the deck was opened from the keyboard rather than reached for.
   // Only then does the deck take the keyboard: a deck that grabbed it every
@@ -44,11 +46,56 @@ Item {
 
   readonly property bool anyOpen: openNoteId !== ""
 
-  // Deleted notes are held here for ten seconds so the toast can put them
+  // A note coming back from the top of the screen says so from the resting
+  // pill -- its dash nudges out a few times and settles. Nothing opens: the
+  // deck fans out when the pointer reaches for it, and a note returning is
+  // not the pointer asking for anything.
+  property string peekNoteId: ""
+  property string peekScreen: ""
+
+  Timer {
+    id: peekTimer
+    // Long enough to read the name of the note that came back.
+    interval: 2000
+    onTriggered: {
+      root.peekNoteId = ""
+      root.peekScreen = ""
+    }
+  }
+
+  // A deleted note is held here for ten seconds so the toast can put them
   // back. A list, not one note: All Notes deletes whole selections.
   property var pendingDeletes: []
 
-  readonly property var deckNotes: Notes.activeNotes(noteStore.notes)
+  readonly property var deckNotes: Notes.deckCandidates(noteStore.notes)
+  // The pinned windows are keyed by id, not by note object.
+  //
+  // A note object is replaced on every write -- the optimistic patch and then
+  // the daemon's reply, so twice per keystroke's save -- and an Instantiator
+  // whose model held those objects tore its window down and built a new one
+  // each time. Typing in a pinned note made it blink and drop the caret. Ids
+  // are strings, so the model only changes when a note is actually pinned or
+  // unpinned, and the window looks the note up itself.
+  property var pinnedIds: []
+
+  function refreshPinnedIds() {
+    var pinned = Notes.pinnedNotes(noteStore.notes)
+    var next = []
+    for (var i = 0; i < pinned.length; i++) next.push(pinned[i].id)
+    if (next.length === root.pinnedIds.length) {
+      var same = true
+      for (var j = 0; j < next.length; j++) {
+        if (next[j] !== root.pinnedIds[j]) { same = false; break }
+      }
+      if (same) return
+    }
+    root.pinnedIds = next
+  }
+
+  Connections {
+    target: noteStore
+    function onNotesChanged() { root.refreshPinnedIds() }
+  }
 
   // Read by the bar widget, so its button carries the window's open state --
   // and by the toggle below, so summoning twice puts the window away.
@@ -153,7 +200,7 @@ Item {
   }
 
   function newNote() {
-    root.pinned = true
+    root.deckHeld = true
     // The new note takes the keyboard itself; the deck behind it should not
     // grab it back when the note closes.
     root.keyboardDeck = false
@@ -166,7 +213,7 @@ Item {
   function openNote(id, screenName, fromKeyboard) {
     root.openScreen = screenName || screenNameFor(root.openScreen)
     root.openNoteId = id
-    root.pinned = true
+    root.deckHeld = true
     if (fromKeyboard !== true && !root.keyboardDeck) root.keyboardDeck = false
   }
 
@@ -174,12 +221,12 @@ Item {
   // to the deck, not all the way out: Esc walks back one step at a time.
   function closeNote() {
     root.openNoteId = ""
-    if (!root.keyboardDeck) root.pinned = false
+    if (!root.keyboardDeck) root.deckHeld = false
   }
 
   function closeDeck() {
     root.openNoteId = ""
-    root.pinned = false
+    root.deckHeld = false
     root.keyboardDeck = false
     // A deck folded by the shortcut must not stay fanned on the strength of a
     // hover flag the pointer set on its way past.
@@ -187,10 +234,10 @@ Item {
   }
 
   function toggleDeck() {
-    if (root.pinned) {
+    if (root.deckHeld) {
       root.closeDeck()
     } else {
-      root.pinned = true
+      root.deckHeld = true
       root.keyboardDeck = true
       root.openScreen = screenNameFor(root.openScreen)
       root.hoveredScreen = root.openScreen
@@ -235,6 +282,47 @@ Item {
 
   function unarchiveNotes(ids) {
     for (var i = 0; i < (ids || []).length; i++) noteStore.setState(ids[i], "active")
+  }
+
+  // Peel a note off the deck and stick it to the desktop. It lands where the
+  // pointer's screen is, near the top left, and the user drags it from there.
+  function pinNote(id) {
+    var note = noteStore.note(id)
+    if (!note) return
+    noteStore.update(id, {
+      pinned: true,
+      pinScreen: screenNameFor(root.openScreen),
+      pinX: note.pinX > 0 ? note.pinX : 80,
+      pinY: note.pinY > 0 ? note.pinY : 80,
+      touch: false
+    })
+    // The note just left the deck for the top of the screen; leaving the deck
+    // fanned open behind it is state nobody asked to keep.
+    root.closeDeck()
+  }
+
+  function unpinNote(id) {
+    var note = noteStore.note(id)
+    noteStore.update(id, { pinned: false, touch: false })
+    // Back among a dozen dashes, a note is easy to lose track of.
+    root.peekScreen = (note && note.pinScreen) ? note.pinScreen : screenNameFor(root.openScreen)
+    root.peekNoteId = id
+    peekTimer.restart()
+  }
+
+  function pinNotes(ids) {
+    for (var i = 0; i < (ids || []).length; i++) pinNote(ids[i])
+  }
+
+  function unpinNotes(ids) {
+    for (var i = 0; i < (ids || []).length; i++) unpinNote(ids[i])
+  }
+
+  function togglePin(id) {
+    var note = noteStore.note(id)
+    if (!note) return
+    if (note.pinned) unpinNote(id)
+    else pinNote(id)
   }
 
   function archiveNote(id) { archiveNotes([id]) }
@@ -363,6 +451,7 @@ Item {
     function about(): string { root.showAbout(); return "ok" }
     function toggle(): string { root.toggleDeck(); return "ok" }
     function count(): string { return String(root.deckNotes.length) }
+    function pin(id: string): string { root.togglePin(id); return "ok" }
     // id, title and state for every note, so a script can pick one to open.
     function list(): string {
       var out = []
@@ -388,7 +477,8 @@ Item {
       var names = []
       for (var i = 0; i < Quickshell.screens.length; i++) names.push(Quickshell.screens[i].name)
       return JSON.stringify({
-        pinned: root.pinned,
+        deckHeld: root.deckHeld,
+        peekScreen: root.peekScreen,
         openScreen: root.openScreen,
         hoveredScreen: root.hoveredScreen,
         openNoteId: root.openNoteId,
@@ -401,6 +491,19 @@ Item {
   }
 
   // ------------------------------------------------------------ windows
+
+  // One window per pinned note, on the screen it was dropped on. A note whose
+  // screen is gone comes back on the first one, rather than nowhere.
+  Instantiator {
+    model: root.pinnedIds
+
+    delegate: PinnedNote {
+      required property string modelData
+      host: root
+      store: noteStore
+      noteId: modelData
+    }
+  }
 
   Variants {
     model: Quickshell.screens
